@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paper Record — Trading Bot</title>
+<style>
+body { font-family: system-ui, sans-serif; background: #0b0e14; color: #e6e9f0; margin: 0; padding: 24px; text-align: left; }
+.wrap { max-width: 900px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: #8b93a7; font-size: 13px; margin-bottom: 16px; }
+.gates { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.gate { background: #141926; border: 1px solid #263048; border-radius: 10px; padding: 10px 12px; }
+.gate .k { font-size: 11px; color: #8b93a7; text-transform: uppercase; letter-spacing: .06em; }
+.gate .v { font-size: 20px; font-weight: 700; margin-top: 2px; }
+.pass { color: #3ddc84; } .fail { color: #ff5d5d; } .warn { color: #ffbe3d; }
+canvas { width: 100%; height: 260px; background: #10141f; border: 1px solid #263048; border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 14px; }
+th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid #1c2333; }
+th:first-child, td:first-child { text-align: left; }
+th { color: #8b93a7; font-weight: 600; }
+#status { color: #8b93a7; font-size: 13px; margin-top: 10px; }
+.pos { color: #3ddc84; } .neg { color: #ff5d5d; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Paper Record <span id="verdict"></span></h1>
+  <div class="sub">Machine-written. One tick per trading day, after NSE close. Friction 0.3%/round-trip baked in; 20% STCG applied to positive years. This page is the product's resume.</div>
+  <div class="gates" id="gates"></div>
+  <canvas id="curve" width="860" height="260"></canvas>
+  <div id="status">loading…</div>
+  <table id="trades"><thead><tr><th>exit</th><th>symbol</th><th>entry</th><th>exit px</th><th>net</th></tr></thead><tbody></tbody></table>
+</div>
+<script>
+const URL = "https://raw.githubusercontent.com/doishy-doish/bot-paper/main/data/paper.json";
+fetch(URL).then(r => { if (!r.ok) throw new Error("no record yet (tick hasn't run)"); return r.json(); })
+.then(d => render(d)).catch(e => { document.getElementById("status").textContent = e.message; });
+
+function render(d) {
+  const eq = d.equity || [];
+  const tr = d.trades || [];
+  document.getElementById("status").textContent =
+    "ticks: " + eq.length + " · last: " + (eq.length ? eq[eq.length-1].date : "—") +
+    " · cash: ₹" + Math.round(d.cash || 0).toLocaleString("en-IN") +
+    " · open slots: " + Object.keys(d.positions || {}).length;
+  // draw equity curve
+  const c = document.getElementById("curve"), x = c.getContext("2d");
+  x.clearRect(0, 0, c.width, c.height);
+  if (eq.length > 1) {
+    const vals = eq.map(p => p.equity), mn = Math.min(...vals), mx = Math.max(...vals);
+    const px = i => 20 + i * (c.width - 40) / (eq.length - 1);
+    const py = v => c.height - 20 - (v - mn) / Math.max(mx - mn, 1e-9) * (c.height - 40);
+    x.strokeStyle = "#3d5a99"; x.lineWidth = 1;
+    x.beginPath(); x.moveTo(20, py(100000)); x.lineTo(c.width - 20, py(100000)); x.stroke();
+    x.strokeStyle = "#3ddc84"; x.lineWidth = 2; x.beginPath();
+    eq.forEach((p, i) => i ? x.lineTo(px(i), py(p.equity)) : x.moveTo(px(i), py(p.equity)));
+    x.stroke();
+  }
+  // gates: CAGR net w/ yearly STCG, max DD, trade count
+  const byYear = {};
+  tr.forEach(t => { const y = t.exitDate.slice(0, 4); (byYear[y] = byYear[y] || []).push(t.net); });
+  let growth = 1; const yrs = Object.keys(byYear).sort();
+  yrs.forEach(y => { const yn = byYear[y].reduce((a, t) => a * (1 + t), 1) - 1; growth *= (1 + (yn > 0 ? yn * 0.8 : yn)); });
+  const days = eq.length ? (Date.parse(eq[eq.length-1].date) - Date.parse(eq[0].date)) / 864e5 : 0;
+  const cagr = days > 30 ? Math.pow(growth, 365 / Math.max(days, 1)) - 1 : 0;
+  let peak = 100000, dd = 0;
+  eq.forEach(p => { peak = Math.max(peak, p.equity); dd = Math.min(dd, p.equity / peak - 1); });
+  const gates = [
+    ["CAGR net", (cagr*100).toFixed(1) + "%", cagr >= 0.20 ? "pass" : "warn", "target ≥ 20%"],
+    ["max drawdown", (dd*100).toFixed(1) + "%", dd <= -0.15 ? "fail" : "pass", "gate ≤ −15%"],
+    ["trades", String(tr.length), tr.length >= 100 ? "pass" : "warn", "min 100"],
+    ["days live", String(eq.length), eq.length >= 30 ? "pass" : "warn", "min 30 to judge"]
+  ];
+  document.getElementById("gates").innerHTML = gates.map(g =>
+    '<div class="gate"><div class="k">' + g[0] + ' · ' + g[3] + '</div><div class="v ' + g[2] + '">' + g[1] + '</div></div>').join("");
+  const ok = cagr >= 0.20 && dd > -0.15 && tr.length >= 100 && eq.length >= 30;
+  document.getElementById("verdict").innerHTML = eq.length >= 30
+    ? (ok ? '<span class="pass">● FUNDED-GRADE</span>' : '<span class="fail">● NOT YET</span>')
+    : '<span class="warn">● MATURING</span>';
+  const tb = document.querySelector("#trades tbody");
+  tb.innerHTML = tr.slice(-25).reverse().map(t =>
+    "<tr><td>" + t.exitDate + "</td><td>" + t.symbol + "</td><td>" + t.entryDate + "</td><td>" +
+    Number(t.exitPx).toFixed(1) + '</td><td class="' + (t.net >= 0 ? "pos" : "neg") + '">' +
+    (t.net * 100).toFixed(2) + "%</td></tr>").join("");
+}
+</script>
+</body>
+</html>
